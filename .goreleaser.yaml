@@ -1,0 +1,29 @@
+version: 2
+project_name: spendfuse
+builds:
+  - id: cli
+    main: ./cmd/spendfuse
+    binary: spendfuse
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags: [-s -w -X main.version={{ .Version }}]
+  - id: lambda
+    main: ./cmd/spendfuse-lambda
+    binary: bootstrap
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [arm64]
+    flags: [-tags=lambda.norpc]
+    ldflags: [-s -w]
+archives:
+  - id: cli
+    ids: [cli]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: lambda
+    ids: [lambda]
+    formats: [zip]
+    name_template: "{{ .ProjectName }}-lambda_{{ .Version }}"
+checksum: { name_template: checksums.txt }
+release: { prerelease: auto }

@@ -1,0 +1,21 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions: { contents: read }
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod, cache: true }
+      - run: go vet ./...
+      - run: go test ./... -race -count=1
+      - run: make build && make lambda
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spendfuse-${{ github.sha }}
+          path: |
+            bin/spendfuse
+            dist/spendfuse-lambda.zip

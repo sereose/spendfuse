@@ -1,0 +1,103 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  spendfuse prototype — NAT Gateway spend signal. Read-only: lists NAT gateways,
+  reads CloudWatch metrics and the public price list, posts to Slack. Takes no
+  action on resources.
+
+Parameters:
+  CodeBucket:
+    Type: String
+    Description: S3 bucket holding spendfuse-lambda.zip (built with `make lambda`)
+  CodeKey:
+    Type: String
+    Default: spendfuse-lambda.zip
+  SlackWebhook:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Slack incoming webhook URL (leave empty for logs only)
+  MaxUSDPerHour:
+    Type: Number
+    Default: 20
+    Description: Breach when one gateway burns more than this per hour
+  MaxRatio:
+    Type: Number
+    Default: 3
+    Description: Breach when burn exceeds this multiple of the 24h baseline
+  DryRun:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: "true" logs what would be sent instead of posting to Slack
+  Schedule:
+    Type: String
+    Default: rate(5 minutes)
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: spendfuse-nat-readonly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeNatGateways
+                  - cloudwatch:GetMetricData
+                  - pricing:GetProducts
+                Resource: "*"
+
+  Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: spendfuse-nat
+      Runtime: provided.al2023
+      Architectures: [arm64]
+      Handler: bootstrap
+      Role: !GetAtt Role.Arn
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          SLACK_WEBHOOK: !Ref SlackWebhook
+          SPENDFUSE_MAX_USD_HOUR: !Ref MaxUSDPerHour
+          SPENDFUSE_MAX_RATIO: !Ref MaxRatio
+          SPENDFUSE_DRY_RUN: !Ref DryRun
+          SPENDFUSE_WINDOW: 5m
+          SPENDFUSE_BASELINE: 24h
+
+  ScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      Targets:
+        - Id: spendfuse-nat
+          Arn: !GetAtt Function.Arn
+
+  InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduleRule.Arn
+
+Outputs:
+  FunctionName:
+    Value: !Ref Function
+  LogGroup:
+    Value: !Sub /aws/lambda/${Function}
