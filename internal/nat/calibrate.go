@@ -166,7 +166,8 @@ func pctError(est, billed float64) float64 {
 	}
 }
 
-// Summary aggregates calibration days into one verdict line.
+// Summary aggregates calibration days into one verdict line. When the bill is
+// $0 (free tier) but usage quantity is present, it compares GB instead.
 func Summary(rs []DayResult) string {
 	var est, billed float64
 	n := 0
@@ -177,10 +178,25 @@ func Summary(rs []DayResult) string {
 			n++
 		}
 	}
+	unit := "$"
+	if n == 0 {
+		// Fall back to data quantity (GB processed), which the bill reports even at $0.
+		for _, r := range rs {
+			if r.BilledGB > 0 {
+				est += r.EstGB
+				billed += r.BilledGB
+				n++
+			}
+		}
+		unit = "GB"
+	}
 	if n == 0 {
 		return "no billed NAT usage in Cost Explorer for these days — nothing to calibrate against (new account, no NAT, or CE lag)"
 	}
 	e := pctError(est, billed)
+	if unit == "GB" {
+		return fmt.Sprintf("%d day(s): billed cost is $0 (free tier?) — comparing data volume instead: estimated %.2f GB vs billed %.2f GB → error %+.1f%%", n, est, billed, e)
+	}
 	grade := "excellent (<5%)"
 	switch {
 	case math.Abs(e) > 25:

@@ -127,3 +127,11 @@ func TestParsePriceList(t *testing.T) {
 		t.Errorf("fallback = %+v", fb)
 	}
 }
+
+func TestSummaryFallsBackToGBWhenFreeTier(t *testing.T) {
+	rs := []DayResult{{Day: "d", EstGB: 3.0, BilledGB: 3.3, EstUSD: 0.015, BilledUSD: 0}}
+	s := Summary(rs, true)
+	if !strings.Contains(s, "free tier") || !strings.Contains(s, "-9.1%") || !strings.Contains(s, "WARNING") {
+		t.Errorf("summary: %s", s)
+	}
+}

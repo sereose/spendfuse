@@ -216,3 +216,11 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+func TestSummaryFallsBackToGBWhenFreeTier(t *testing.T) {
+	rs := []DayResult{{Day: "d", EstGB: 10.5, BilledGB: 10.0, EstTotalUSD: 0.47, BilledTotalUSD: 0}}
+	s := Summary(rs)
+	if !contains(s, "free tier") || !contains(s, "10.50 GB vs billed 10.00 GB") || !contains(s, "+5.0%") {
+		t.Errorf("summary: %s", s)
+	}
+}

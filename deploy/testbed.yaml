@@ -1,0 +1,243 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  spendfuse testbed — generates predictable NAT Gateway and Logs Insights usage
+  so the calibration has something to measure. Cost: NAT ~$1.1/day + ~$0.045/GB
+  processed, t4g.nano ~$0.10/day, Lambda/logs cents. Delete the stack when done.
+
+Parameters:
+  DownloadMB:
+    Type: Number
+    Default: 300
+    Description: MB pulled through the NAT gateway on each run (Cloudflare speed test endpoint; inbound internet traffic itself is free)
+  IntervalMinutes:
+    Type: Number
+    Default: 15
+    Description: Minutes between downloads (300 MB / 15 min ≈ 29 GB/day ≈ $1.30/day of NAT processing)
+  QueryIntervalMinutes:
+    Type: Number
+    Default: 5
+    Description: Minutes between Logs Insights queries (simulates an auto-refreshing dashboard widget)
+  LogKBPerRun:
+    Type: Number
+    Default: 200
+    Description: KB of log lines written per run so the scanned volume grows over the days
+
+Mappings:
+  Net:
+    Vpc: { Cidr: 10.42.0.0/16 }
+    Public: { Cidr: 10.42.0.0/24 }
+    Private: { Cidr: 10.42.1.0/24 }
+
+Resources:
+  # ---------------------------------------------------------------- network
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [Net, Vpc, Cidr]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: spendfuse-testbed }]
+
+  IGW:
+    Type: AWS::EC2::InternetGateway
+  IGWAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: { VpcId: !Ref VPC, InternetGatewayId: !Ref IGW }
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [Net, Public, Cidr]
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: spendfuse-public }]
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [Net, Private, Cidr]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: spendfuse-private }]
+
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttach
+    Properties: { Domain: vpc }
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags: [{ Key: Name, Value: spendfuse-testbed }]
+
+  PublicRT:
+    Type: AWS::EC2::RouteTable
+    Properties: { VpcId: !Ref VPC }
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttach
+    Properties: { RouteTableId: !Ref PublicRT, DestinationCidrBlock: 0.0.0.0/0, GatewayId: !Ref IGW }
+  PublicAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnet, RouteTableId: !Ref PublicRT }
+
+  PrivateRT:
+    Type: AWS::EC2::RouteTable
+    Properties: { VpcId: !Ref VPC }
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties: { RouteTableId: !Ref PrivateRT, DestinationCidrBlock: 0.0.0.0/0, NatGatewayId: !Ref NatGateway }
+  PrivateAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnet, RouteTableId: !Ref PrivateRT }
+
+  # ---------------------------------------------------------------- NAT traffic generator
+  PullerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: spendfuse puller — egress only
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+
+  PullerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore   # lets you `aws ssm start-session` without SSH
+  PullerProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: { Roles: [!Ref PullerRole] }
+
+  Puller:
+    Type: AWS::EC2::Instance
+    DependsOn: PrivateDefaultRoute
+    Properties:
+      InstanceType: t4g.nano
+      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}"
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds: [!Ref PullerSG]
+      IamInstanceProfile: !Ref PullerProfile
+      Tags: [{ Key: Name, Value: spendfuse-puller }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eu
+          BYTES=$(( ${DownloadMB} * 1000000 ))
+          cat > /usr/local/bin/pull.sh <<EOF
+          #!/bin/bash
+          # Pull $BYTES bytes through the NAT gateway. Inbound from the internet is free;
+          # NAT charges per GB processed. Output discarded.
+          curl -sS -o /dev/null --max-time 600 "https://speed.cloudflare.com/__down?bytes=$BYTES" \
+            && logger -t spendfuse "pulled $BYTES bytes" || logger -t spendfuse "pull failed"
+          EOF
+          chmod +x /usr/local/bin/pull.sh
+          echo "*/${IntervalMinutes} * * * * root /usr/local/bin/pull.sh" > /etc/cron.d/spendfuse
+          systemctl enable --now crond
+          /usr/local/bin/pull.sh &
+
+  # ---------------------------------------------------------------- Logs Insights generator
+  NoiseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /spendfuse/testbed/noise
+      RetentionInDays: 7
+
+  QuerierRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]
+      Policies:
+        - PolicyName: spendfuse-testbed-querier
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:StartQuery, logs:GetQueryResults, logs:PutLogEvents, logs:CreateLogStream, logs:DescribeLogStreams]
+                Resource: "*"
+
+  Querier:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: spendfuse-testbed-querier
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt QuerierRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          LOG_GROUP: !Ref NoiseLogGroup
+          LOG_KB: !Ref LogKBPerRun
+      Code:
+        ZipFile: |
+          import os, time, json, random, string, boto3
+          logs = boto3.client("logs")
+          GROUP = os.environ["LOG_GROUP"]
+          KB = int(os.environ.get("LOG_KB", "200"))
+
+          def write_noise():
+              stream = time.strftime("%Y/%m/%d") + "-" + str(int(time.time()))
+              logs.create_log_stream(logGroupName=GROUP, logStreamName=stream)
+              now = int(time.time() * 1000)
+              events, size = [], 0
+              i = 0
+              while size < KB * 1024:
+                  level = random.choice(["INFO", "INFO", "INFO", "WARN", "ERROR"])
+                  msg = json.dumps({"level": level, "req": "".join(random.choices(string.ascii_lowercase, k=12)),
+                                    "latency_ms": random.randint(5, 900), "pad": "x" * 200})
+                  events.append({"timestamp": now + i, "message": msg})
+                  size += len(msg); i += 1
+                  if len(events) == 500:
+                      logs.put_log_events(logGroupName=GROUP, logStreamName=stream, logEvents=events); events = []
+              if events:
+                  logs.put_log_events(logGroupName=GROUP, logStreamName=stream, logEvents=events)
+              return size
+
+          def dashboard_query():
+              # Same query every run, wide window: exactly what an auto-refreshing widget does.
+              end = int(time.time()); start = end - 7 * 24 * 3600
+              q = logs.start_query(logGroupName=GROUP, startTime=start, endTime=end,
+                                   queryString='fields @timestamp, @message | filter level = "ERROR" | sort @timestamp desc | limit 50')
+              for _ in range(20):
+                  r = logs.get_query_results(queryId=q["queryId"])
+                  if r["status"] in ("Complete", "Failed", "Cancelled", "Timeout"):
+                      return r.get("statistics", {}).get("bytesScanned", 0)
+                  time.sleep(1)
+              return -1
+
+          def handler(event, context):
+              wrote = write_noise()
+              scanned = dashboard_query()
+              print(json.dumps({"wrote_bytes": wrote, "scanned_bytes": scanned}))
+              return {"wrote": wrote, "scanned": scanned}
+
+  QuerierSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: !Sub "rate(${QueryIntervalMinutes} minutes)"
+      State: ENABLED
+      Targets: [{ Id: querier, Arn: !GetAtt Querier.Arn }]
+  QuerierPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Querier
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt QuerierSchedule.Arn
+
+Outputs:
+  NatGatewayId:
+    Value: !Ref NatGateway
+  PullerInstanceId:
+    Value: !Ref Puller
+  NoiseLogGroup:
+    Value: !Ref NoiseLogGroup
+  ExpectedNatGBPerDay:
+    Value: !Sub "${DownloadMB} MB every ${IntervalMinutes} min ≈ see TESTBED.md for the formula"

@@ -153,10 +153,29 @@ func Summary(rs []DayResult, truncated bool) string {
 			n++
 		}
 	}
+	unit := "$"
+	if n == 0 {
+		// Free tier: first 5 GB scanned/month bill at $0 but usage quantity is reported.
+		for _, r := range rs {
+			if r.BilledGB > 0 {
+				est += r.EstGB
+				billed += r.BilledGB
+				n++
+			}
+		}
+		unit = "GB"
+	}
 	if n == 0 {
 		return "no billed Logs Insights scanning in Cost Explorer for these days — nothing to calibrate against"
 	}
 	e := pctError(est, billed)
+	if unit == "GB" {
+		s := fmt.Sprintf("%d day(s): billed cost is $0 (free tier) — comparing scanned volume instead: estimated %.2f GB vs billed %.2f GB → error %+.1f%%", n, est, billed, e)
+		if truncated {
+			s += "\nWARNING: DescribeQueries history was cut off; older days are under-counted."
+		}
+		return s
+	}
 	grade := "excellent (<5%)"
 	switch {
 	case math.Abs(e) > 25:

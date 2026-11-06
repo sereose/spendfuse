@@ -114,6 +114,10 @@ Runs every 5 minutes, ~$0.20/month in Lambda + GetMetricData.
 
 Out of scope: third-party SaaS bills (New Relic, Datadog ingest overages). Same pattern, but each vendor needs its own usage API and the kill switch lives on their side — a separate product if ever.
 
+## Testbed
+
+No account with NAT or Logs Insights traffic? [TESTBED.md](TESTBED.md) deploys a self-contained one (~$3/day) and walks from a fresh account to the calibration number.
+
 ## For testers
 
 See [TESTERS.md](TESTERS.md): what the tool reads, the exact IAM policy, and the two commands that produce the calibration number.
