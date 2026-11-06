@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -24,19 +25,43 @@ func handler(ctx context.Context) (string, error) {
 		SlackWebhook:  os.Getenv("SLACK_WEBHOOK"),
 		DryRun:        os.Getenv("SPENDFUSE_DRY_RUN") == "true",
 	}
+	lo := run.LogsOptions{
+		Window:              envDuration("SPENDFUSE_LOGS_WINDOW", time.Hour),
+		MaxUSDPerHour:       envFloat("SPENDFUSE_LOGS_MAX_USD_HOUR", 5),
+		MaxProjectedMonthly: envFloat("SPENDFUSE_LOGS_MAX_PROJECTED_MONTHLY", 500),
+		SlackWebhook:        o.SlackWebhook,
+		DryRun:              o.DryRun,
+		TopN:                10,
+	}
 	c, err := run.Connect(ctx, o)
 	if err != nil {
 		return "", err
 	}
-	out, breached, err := run.Watch(ctx, c, o)
-	if err != nil {
-		return "", err
+	var all []string
+	anyBreach := false
+	for _, s := range []struct {
+		name string
+		fn   func() (string, bool, error)
+	}{
+		{"nat", func() (string, bool, error) { return run.Watch(ctx, c, o) }},
+		{"logs", func() (string, bool, error) { return run.LogsWatch(ctx, c, lo) }},
+	} {
+		if os.Getenv("SPENDFUSE_SIGNALS") != "" && !strings.Contains(os.Getenv("SPENDFUSE_SIGNALS"), s.name) {
+			continue
+		}
+		out, breached, err := s.fn()
+		if err != nil {
+			log.Printf("%s: %v", s.name, err) // one failing signal must not silence the others
+			continue
+		}
+		log.Print(out) // CloudWatch Logs keeps the history for calibration review
+		all = append(all, out)
+		anyBreach = anyBreach || breached
 	}
-	log.Print(out) // CloudWatch Logs keeps the history for calibration review
-	if breached {
+	if anyBreach {
 		log.Print("BREACH")
 	}
-	return out, nil
+	return strings.Join(all, "\n"), nil
 }
 
 func envDuration(k string, d time.Duration) time.Duration {

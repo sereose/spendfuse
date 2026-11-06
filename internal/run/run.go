@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/pricing"
 
+	"github.com/sereose/spendfuse/internal/logsinsights"
 	"github.com/sereose/spendfuse/internal/nat"
 	"github.com/sereose/spendfuse/internal/notify"
 )
@@ -33,13 +34,15 @@ type Options struct {
 	Days          int // calibrate only
 }
 
-// Clients bundles what the signal needs.
+// Clients bundles what the signals need.
 type Clients struct {
-	Region string
-	EC2    *ec2.Client
-	CW     *cloudwatch.Client
-	CE     *costexplorer.Client
-	Price  nat.Price
+	Region    string
+	EC2       *ec2.Client
+	CW        *cloudwatch.Client
+	CE        *costexplorer.Client
+	Price     nat.Price          // NAT Gateway
+	LogsPrice logsinsights.Price // Logs Insights per-GB scanned
+	cfg       aws.Config
 }
 
 // Connect loads AWS config and resolves the NAT price for the region.
@@ -67,8 +70,11 @@ func Connect(ctx context.Context, o Options) (*Clients, error) {
 		EC2:    ec2.NewFromConfig(cfg),
 		CW:     cloudwatch.NewFromConfig(cfg),
 		CE:     costexplorer.NewFromConfig(global),
+		cfg:    cfg,
 	}
-	c.Price = nat.LookupPrice(ctx, pricing.NewFromConfig(global), cfg.Region)
+	pr := pricing.NewFromConfig(global)
+	c.Price = nat.LookupPrice(ctx, pr, cfg.Region)
+	c.LogsPrice = logsinsights.LookupPrice(ctx, pr, cfg.Region)
 	return c, nil
 }
 
@@ -148,5 +154,3 @@ func trunc(s string, n int) string {
 	}
 	return s[:n-1] + "…"
 }
-
-var _ = aws.String // keep aws import for future options

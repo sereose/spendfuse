@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  spendfuse prototype — NAT Gateway spend signal. Read-only: lists NAT gateways,
-  reads CloudWatch metrics and the public price list, posts to Slack. Takes no
-  action on resources.
+  spendfuse prototype — NAT Gateway and Logs Insights spend signals. Read-only:
+  lists NAT gateways and recent Logs Insights queries, reads CloudWatch metrics
+  and the public price list, posts to Slack. Takes no action on resources.
 
 Parameters:
   CodeBucket:
@@ -24,6 +24,14 @@ Parameters:
     Type: Number
     Default: 3
     Description: Breach when burn exceeds this multiple of the 24h baseline
+  LogsMaxUSDPerHour:
+    Type: Number
+    Default: 5
+    Description: Logs Insights — breach when total scanning burn exceeds this per hour
+  LogsMaxProjectedMonthly:
+    Type: Number
+    Default: 500
+    Description: Logs Insights — breach when one repeating query projects above this per month
   DryRun:
     Type: String
     Default: "true"
@@ -54,6 +62,7 @@ Resources:
                 Action:
                   - ec2:DescribeNatGateways
                   - cloudwatch:GetMetricData
+                  - logs:DescribeQueries
                   - pricing:GetProducts
                 Resource: "*"
 
@@ -78,6 +87,10 @@ Resources:
           SPENDFUSE_DRY_RUN: !Ref DryRun
           SPENDFUSE_WINDOW: 5m
           SPENDFUSE_BASELINE: 24h
+          SPENDFUSE_LOGS_WINDOW: 1h
+          SPENDFUSE_LOGS_MAX_USD_HOUR: !Ref LogsMaxUSDPerHour
+          SPENDFUSE_LOGS_MAX_PROJECTED_MONTHLY: !Ref LogsMaxProjectedMonthly
+          SPENDFUSE_SIGNALS: nat,logs
 
   ScheduleRule:
     Type: AWS::Events::Rule
