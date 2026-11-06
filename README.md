@@ -114,6 +114,10 @@ Runs every 5 minutes, ~$0.20/month in Lambda + GetMetricData.
 
 Out of scope: third-party SaaS bills (New Relic, Datadog ingest overages). Same pattern, but each vendor needs its own usage API and the kill switch lives on their side — a separate product if ever.
 
+## For testers
+
+See [TESTERS.md](TESTERS.md): what the tool reads, the exact IAM policy, and the two commands that produce the calibration number.
+
 ## Status
 
 Prototype. No actions, two signals, single region per run. Unit tests cover the math and the Cost Explorer parsing with fakes; the number that matters comes from running `calibrate` against a real account.
